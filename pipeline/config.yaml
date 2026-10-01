@@ -1,0 +1,26 @@
+# Stream pipeline tunables (SPEC §3).
+
+sample_every: 500                  # follow 1 raw payload in N through the stages (Pipeline screen); 0 = off
+samples_kept: 300                 # newest samples kept in Redis list pipeline:samples
+
+kafka:
+  group_id: pipeline
+  batch_size: 1000                 # messages consumed per poll
+  poll_timeout_s: 0.5
+
+dedup:
+  slot_s: 600                      # a new Bloom filter every 10 minutes
+  ttl_s: 1200                      # each filter lives 20 minutes (current + previous)
+  error_rate: 0.001                # target false-positive rate 0.1%
+  capacity: 5000000                # events per slot before the filter expands
+
+reorder:
+  watermark_s: 120                 # events more than 2 min behind the newest seen -> late.events
+  max_hold_s: 130                  # processing-time safety valve for vehicles that go silent
+  restart_seq_max: 5               # seq falls back to <= this...
+  restart_min_drop: 50             # ...and at least this far below the highest seen -> tracker restarted
+
+noise:
+  stopped_kmh: 1.0                 # below this a vehicle counts as stopped
+  jitter_snap_m: 15                # stopped + moved less than this -> snap to previous point
+  max_implied_kmh: 250             # faster than this between two fixes -> flag suspect_gps

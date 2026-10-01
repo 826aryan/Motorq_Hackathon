@@ -1,0 +1,30 @@
+{
+  "vehicles": 100000,
+  "window_s": 298,
+  "events_per_s_generated": 8665,
+  "events_per_s_sent_incl_duplicates": 9523,
+  "events_per_s_pipeline_in": 9531,
+  "events_per_s_cleaned": 8609,
+  "events_per_s_detectors": 8610,
+  "send_errors": 3500,
+  "kafka_lag_max": {
+    "pipeline": 513496,
+    "detectors": 213260,
+    "storage": 776456
+  },
+  "kafka_lag_end": {
+    "pipeline": 26735,
+    "detectors": 51886,
+    "storage": 776252
+  },
+  "gateway_to_clean_latency_s": {
+    "p50": 27.0,
+    "p90": 88.9,
+    "p99": 115.9
+  },
+  "alerts_seen": 212,
+  "event_to_alert_latency_s": {
+    "p50": 1.7,
+    "p90": 76.2
+  }
+}

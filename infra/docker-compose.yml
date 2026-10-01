@@ -1,0 +1,195 @@
+# Full local stack. Run from repo root:  docker compose -f infra/docker-compose.yml --env-file .env up -d --build
+name: asset-recovery
+
+x-python-service: &python-service
+  env_file: ../.env
+  restart: unless-stopped
+
+services:
+  # ---------- infrastructure ----------
+  redpanda:
+    image: redpandadata/redpanda:v24.2.13
+    command:
+      - redpanda start --mode dev-container --smp 1 --memory 1G
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports: ["19092:19092"]
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
+      interval: 5s
+      retries: 20
+
+  redpanda-init:   # creates the four topics once, then exits
+    image: redpandadata/redpanda:v24.2.13
+    depends_on: { redpanda: { condition: service_healthy } }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        for t in raw.telemetry normalized.events dead.letter late.events detector.signals; do
+          rpk topic create $$t -p $${KAFKA_PARTITIONS:-12} -X brokers=redpanda:9092 || true;
+          rpk topic alter-config $$t --set retention.ms=$${KAFKA_RETENTION_MS:-21600000} -X brokers=redpanda:9092;
+        done
+    env_file: ../.env
+    restart: "no"
+
+  redis:
+    image: redis/redis-stack-server:7.4.0-v1   # includes RedisBloom
+    ports: ["${REDIS_HOST_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../db/migrations:/docker-entrypoint-initdb.d:ro
+    ports: ["${POSTGRES_HOST_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 20
+
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_USER: ${TIMESCALE_USER}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD}
+      POSTGRES_DB: ${TIMESCALE_DB}
+    volumes:
+      - tsdata:/var/lib/postgresql/data
+      - ../db/timescale:/docker-entrypoint-initdb.d:ro
+    ports: ["${TIMESCALE_HOST_PORT:-5433}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 20
+
+  # ---------- application services (health endpoint only in step 1) ----------
+  simulator:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    environment:
+      SERVICE_NAME: simulator
+      SIM_CONFIG: /app/simulator/config.yaml
+      SIM_VEHICLES: ${SIM_VEHICLES:-}      # override fleet.vehicles, e.g. 100000 for the load test
+      SIM_WORKERS: ${SIM_WORKERS:-}
+    command: ["python", "-m", "simulator.run"]
+    depends_on: [gateway]
+    volumes:
+      - ../data:/app/data:ro                                     # road graph
+      - ../simulator/config.yaml:/app/simulator/config.yaml:ro   # edit on host -> chaos changes live
+      - sim-state:/app/state                                     # demo-mode clock offset (only grows)
+    ports: ["8002:8000"]
+
+  gateway:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: gateway }
+    depends_on: { redpanda: { condition: service_healthy } }
+    ports: ["8001:8000"]
+
+  pipeline:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "pipeline.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: pipeline }
+    depends_on:
+      redpanda: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    deploy:
+      replicas: ${PIPELINE_REPLICAS:-3}      # Kafka splits the 12 partitions (vehicles) between replicas
+    ports: ["8030-8039:8000"]                # one host port per replica; totals are in Redis stats:pipeline
+
+  seed:            # fills the 3NF tables with synthetic lenders, loans, geofences once, then exits
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    environment: { SERVICE_NAME: seed }
+    command: ["python", "-m", "db.seed.seed"]
+    volumes: ["../simulator/config.yaml:/app/simulator/config.yaml:ro"]
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: "no"
+
+  detectors:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "detectors.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: detectors }
+    depends_on:
+      redpanda: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      seed: { condition: service_completed_successfully }
+    volumes: ["../data:/app/data:ro"]            # road graph for route deviation
+    deploy:
+      replicas: ${DETECTOR_REPLICAS:-3}      # per-vehicle state: Kafka gives each replica its own partitions
+    ports: ["8040-8049:8000"]                # one host port per replica; totals are in Redis stats:detectors
+
+  storage:         # normalized + late events -> TimescaleDB
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "storage.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: storage }
+    depends_on:
+      redpanda: { condition: service_healthy }
+      timescaledb: { condition: service_healthy }
+    ports: ["8006:8000"]
+
+  batch:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "batch.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: batch }
+    depends_on:
+      postgres: { condition: service_healthy }
+      timescaledb: { condition: service_healthy }
+      seed: { condition: service_completed_successfully }
+    volumes: ["../data:/app/data"]               # writes Parquet history + reports; reads the road graph
+    ports: ["8005:8000"]
+
+  api:
+    <<: *python-service
+    image: ${REGISTRY:-local}/asset-recovery-python:${IMAGE_TAG:-dev}
+    build: { context: .., dockerfile: infra/python.Dockerfile }
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: { SERVICE_NAME: api }
+    depends_on:
+      postgres: { condition: service_healthy }
+      timescaledb: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      seed: { condition: service_completed_successfully }
+    volumes: ["../data:/app/data:ro"]            # road graph, Parquet history, reports
+    ports: ["8000:8000"]
+
+  web:            # React dashboard served by nginx; /api and /ws are proxied to the api service
+    image: ${REGISTRY:-local}/asset-recovery-web:${IMAGE_TAG:-dev}
+    build: { context: ../web }
+    depends_on: [api]
+    ports: ["8080:80"]
+    restart: unless-stopped
+
+  # ---------- one-off tools:  docker compose ... --profile tools run --rm graph-builder ----------
+  graph-builder:
+    profiles: ["tools"]
+    image: python:3.12-slim
+    working_dir: /app
+    volumes: ["..:/app"]
+    command: sh -c "pip install -q osmnx==2.1.1 pyyaml==6.0.3 && python -m simulator.build_graph"
+
+volumes:
+  pgdata:
+  tsdata:
+  sim-state:

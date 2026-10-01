@@ -1,0 +1,19 @@
+graph_path: data/graph/road_graph.npz
+traffic_speed_factor: 0.6
+center: [12.9716, 77.5946]
+agent_radius_m: 5000           # simulated agents start somewhere inside the city core
+max_live_points: 20000         # REST /vehicles/live cap
+ws_max_points: 5000            # WebSocket positions per push (the map clusters them)
+ws_push_every_s: 2
+reporting_window_s: 180      # live map + "Fleet live": vehicles that reported in the last 3 min (event time);
+                             # every tracker reports at least every 30 s, so a switched-off one leaves quickly
+hot_days: 30                   # older trails come from Parquet
+parquet_root: data/parquet
+reports_root: data/reports
+privacy:
+  k_anonymity: 10              # only cells with at least 10 vehicles
+  cell_precision: 5            # geohash-5, ~5 km
+service_stats:
+  simulator: http://simulator:8000/stats
+  gateway: http://gateway:8000/stats
+  storage: http://storage:8000/stats

@@ -1,0 +1,12 @@
+tz_offset_h: 5.5
+parquet_root: data/parquet
+reports_root: data/reports
+baseline_days: 14
+moving_kmh: 5
+schedule:                     # local time (IST)
+  nightly: "02:00"            # export yesterday -> baseline -> rescore -> convoy rebuild
+  report: "06:00"
+slow_convoy:                  # looser than live: catch groups that stop and start together
+  runs_required: 6
+  max_missed_runs: 3
+  moving_kmh: 5

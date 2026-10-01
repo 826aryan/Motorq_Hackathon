@@ -1,0 +1,59 @@
+# Simulator settings. The `chaos` block is re-read live while running (edit + save to change rates).
+
+seed: 42
+
+graph:
+  center: [12.9716, 77.5946]       # central Bengaluru
+  radius_m: 8000
+  path: data/graph/road_graph.npz
+  traffic_speed_factor: 0.6         # real traffic is slower than posted speeds
+
+fleet:
+  vehicles: 100000                  # the whole fleet is always loaded (matches the 100k seeded loans)...
+  active_vehicles: 1000             # ...but only this many report; change live from the dashboard (Load button)
+  active_presets: [1000, 10000, 100000]
+  workers: 6                        # processes; vehicles are split across them
+  emit_interval_s: [10, 30]         # each vehicle picks one interval in this range
+  oem_share: { A: 0.40, B: 0.35, C: 0.25 }
+  home_radius_m: 5000               # homes, work places and errands stay within this of graph.center
+  work_distance_m: [2000, 7000]     # how far a vehicle's work node is from home
+  depart_hour: [7, 10]              # local time (IST) leaving home
+  return_hour: [17, 20]
+  errands_per_day: 2                # extra short trips during active hours
+  errand_distance_m: [500, 3000]
+
+clock:
+  offset_h: 0                       # sim time = real time + offset; e.g. -6 at 14:00 IST shows 08:00 rush hour
+  time_scale: 1.0                   # sim seconds per real second
+  timezone_offset_h: 5.5
+  demo_start_hour: 8                # demo mode: at launch, jump forward to this local hour (rush hour); null = off
+  demo_window_h: 3                  # a restart inside [start, start + window) keeps the current clock
+
+personas:                           # share of the fleet; the rest are Normal
+  towed: 0.002
+  absconding: 0.002
+  tampered: 0.002
+  convoy_groups_per_1000: 1         # each group has 3-6 vehicles
+  incident_after_real_s: [60, 600]  # incidents start this long after launch, so the demo sees them
+  towed_speed_kmh: 25
+  abscond_min_from_center_m: 7000  # absconding vehicles head beyond this (lender geofence is 6 km)
+  tamper_jump_s: 120                # GPS jumps + voltage drop for this long...
+  tamper_silence_s: 1800            # ...then silence
+  convoy_legs: 8                    # convoy drives several legs together (~1.5-2 h), enough for the 30-min rule
+
+gateway:
+  url: http://gateway:8000/ingest
+  batch_max: 500
+  flush_every_s: 0.2
+
+chaos:
+  duplicate_rate: 0.05              # share of events resent 1-3 extra times
+  out_of_order_rate: 0.05           # share delayed by 0-120 s
+  max_delay_s: 120
+  gps_jitter_m: 5                   # normal GPS noise (std dev)
+  gps_jump_rate: 0.001              # occasional big jumps
+  gps_jump_m: [1000, 5000]
+  malformed_rate: 0.01
+  burst_every_s: 300                # every few minutes...
+  burst_duration_s: 30              # ...for 30 s...
+  burst_multiplier: 10              # ...send 10x as often

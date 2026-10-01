@@ -1,0 +1,60 @@
+# Merge to main: build images tagged with the commit hash -> push to GHCR -> deploy to a Docker VM over SSH
+# -> smoke test -> roll back to the previous tag if the smoke test fails.
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions) - never commit these:
+#   DEPLOY_HOST      VM address (any cloud: GCP Compute Engine, AWS EC2, Azure VM, ...)
+#   DEPLOY_USER      SSH user on the VM (Docker + Compose installed, user in the docker group)
+#   DEPLOY_SSH_KEY   private key for that user
+#   DEPLOY_ENV_FILE  full contents of the production .env (real passwords, JWT_SECRET, PARTNER_KEYS, ...)
+name: deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    env:
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Build and push (tag = commit hash)
+        run: |
+          touch .env
+          export REGISTRY=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
+          docker compose -f infra/docker-compose.yml build api web
+          docker compose -f infra/docker-compose.yml push api web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ship compose files + configs, then deploy on the VM
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+          TAG: ${{ github.sha }}
+        run: |
+          mkdir -p ~/.ssh && printf '%s\n' "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          REGISTRY=ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          tar czf bundle.tgz infra db simulator/config.yaml simulator/build_graph.py shared pipeline/config.yaml \
+              detectors/config.yaml api/config.yaml batch/config.yaml
+          scp -i ~/.ssh/id bundle.tgz "$USER@$HOST:/tmp/bundle.tgz"
+          printf '%s\n' "$ENV_FILE" | ssh -i ~/.ssh/id "$USER@$HOST" 'mkdir -p ~/asset-recovery && cat > ~/asset-recovery/.env && chmod 600 ~/asset-recovery/.env'
+          ssh -i ~/.ssh/id "$USER@$HOST" "bash -s" -- "$REGISTRY" "$TAG" < infra/deploy.sh

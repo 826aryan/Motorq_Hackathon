@@ -1,0 +1,61 @@
+# Detector tunables (SPEC §4).
+
+kafka:
+  group_id: detectors
+  batch_size: 1000
+  poll_timeout_s: 0.5
+
+geofence:
+  precision: 6                 # geohash-6 cover cells (~1.2 x 0.6 km)
+  exit_after: 3                # consecutive outside events before GEOFENCE_EXIT
+
+anomaly:
+  window_s: 600                # 10-minute sliding window
+  tow_min_m: 500               # ignition off but moved more than this -> TOW_SUSPECTED
+  tow_full_strength_m: 1000    # strength reaches 1.0 at this distance
+  tow_confirm_points: 3        # this many latest points must agree (sustained move, not a glitch)
+  night_hours: [0, 5]
+  moving_kmh: 5
+  tamper_silence_s: 900        # suspicious point followed by 15 min of silence
+  battery_drop_v: 0.2          # drop vs window max that counts as a tamper precursor
+  battery_low_v: 3.6
+  speed_spike_std: 3
+  speed_spike_min_points: 5
+  tz_offset_h: 5.5
+
+route:
+  graph_path: data/graph/road_graph.npz
+  traffic_speed_factor: 0.6
+  max_off_path_m: 2000         # more than 2 km off the expected A* path...
+  min_off_path_s: 300          # ...for 5 minutes -> ROUTE_DEVIATION
+  moving_kmh: 5
+  path_cache_size: 20000
+
+convoy:
+  every_s: 300                 # one run every 5 minutes (one replica holds lock:convoy)
+  moving_kmh: 10
+  max_distance_m: 600          # latest positions are 10-30 s apart per vehicle, so allow some spread
+  max_heading_diff_deg: 45
+  max_speed_diff_kmh: 20
+  runs_required: 6             # seen together 6 runs in a row = 30 minutes
+  max_missed_runs: 1           # forgive one noisy run inside the streak
+  min_size: 3
+  fresh_s: 120                 # ignore vehicles whose latest event is older than this
+
+map_stale_s: 1800               # silent this long -> off the live map (last position kept in pos:live)
+
+risk:
+  weights:                     # SPEC §4.5; SPEED_SPIKE is not in the spec (placeholder, see signal_type)
+    TOW_SUSPECTED: 30
+    GEOFENCE_EXIT: 25
+    TAMPER_SUSPECTED: 25
+    CONVOY: 20
+    ROUTE_DEVIATION: 15
+    NIGHT_MOVEMENT: 10
+    SPEED_SPIKE: 5
+  decay_s: 86400               # signal strength fades to 0 over 24 h
+  max_days_past_due: 90        # loan multiplier reaches 2.0 here
+  case_threshold: 70           # score above this -> alert + recovery case
+  alert_cooldown_s: 1800       # at most one alert row per vehicle+signal per 30 min
+  rescore_every_s: 60          # refresh fading scores in risk:top
+  top_key: "risk:top"
